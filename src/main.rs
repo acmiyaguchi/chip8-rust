@@ -1,6 +1,7 @@
 extern crate piston_window;
 extern crate image as im;
 extern crate vecmath;
+extern crate rand;
 
 use piston_window::*;
 use vecmath::*;
@@ -14,76 +15,106 @@ macro_rules! x_i { ($e:expr) => { x!($e) as usize } }
 macro_rules! y_i { ($e:expr) => { y!($e) as usize } }
 
 struct Chip8 {
-    mem: [u8; 0x1000],
-    reg: [u8; 0x10],
-    I: u16,
-    PC: u16,
-    SP: u8,
+    memory: [u8; 0x1000],
+    register: [u8; 0x10],
+    register_I: u16,
+    program_counter: u16,
+    stack_pointer: u8,
     stack: [u16; 0x10],
     delay_timer: u8,
     sound_timer: u8,
     display: [u8; 64 * 32],
+    wait_for_input: bool,
+    last_opcode: u16,
 }
 
 impl Chip8 {
     fn new() -> Chip8 {
         // The sprite table of 0..0xf, each 5 bytes long
-        let sprites: [u8; 0x50] =
-            [0xF0, 0x90, 0x90, 0x90, 0xF0, 0x20, 0x60, 0x20, 0x20, 0x70, 0xF0, 0x10, 0xF0, 0x80,
-             0xF0, 0xF0, 0x10, 0xF0, 0x10, 0xF0, 0x90, 0x90, 0xF0, 0x10, 0x10, 0xF0, 0x80, 0xF0,
-             0x10, 0xF0, 0xF0, 0x80, 0xF0, 0x90, 0xF0, 0xF0, 0x10, 0x20, 0x40, 0x40, 0xF0, 0x90,
-             0xF0, 0x90, 0xF0, 0xF0, 0x90, 0xF0, 0x10, 0xF0, 0xF0, 0x90, 0xF0, 0x90, 0x90, 0xE0,
-             0x90, 0xE0, 0x90, 0xE0, 0xF0, 0x80, 0x80, 0x80, 0xF0, 0xE0, 0x90, 0x90, 0x90, 0xE0,
-             0xF0, 0x80, 0xF0, 0x80, 0xF0, 0xF0, 0x80, 0xF0, 0x80, 0x80];
+        let sprites: [u8; 0x50] = [
+            0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+            0x20, 0x60, 0x20, 0x20, 0x70, // 1
+            0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+            0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+            0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+            0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+            0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+            0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+            0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+            0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+            0xF0, 0x90, 0xF0, 0x90, 0x90, // a
+            0xE0, 0x90, 0xE0, 0x90, 0xE0, // b
+            0xF0, 0x80, 0x80, 0x80, 0xF0, // c
+            0xE0, 0x90, 0x90, 0x90, 0xE0, // d
+            0xF0, 0x80, 0xF0, 0x80, 0xF0, // e
+            0xF0, 0x80, 0xF0, 0x80, 0x80  // f
+        ];
 
         // Load the sprite table into memory
         let mut mem = [0; 0x1000];
         for i in 0..0x50 {
             mem[i] = sprites[i];
         }
-        
+
         Chip8 {
-            mem: [0; 0x1000],
-            reg: [0; 0x10],
-            I: 0,
-            PC: 0,
-            SP: 0,
+            memory: mem,
+            register: [0; 0x10],
+            register_I: 0,
+            program_counter: 0,
+            stack_pointer: 0,
             stack: [0; 0x10],
             sound_timer: 0,
             delay_timer: 0,
             display: [0; 64 * 32],
+            wait_for_input: false,
+            last_opcode: 0,
         }
     }
 
     fn fetch_opcode(&self) -> u16 {
-        let hb = self.mem[self.I as usize] as u16;
-        let lb = self.mem[(self.I + 1) as usize] as u16;
+        let pc = self.program_counter as usize;
+        let hb = self.memory[pc] as u16;
+        let lb = self.memory[pc + 1] as u16;
         (hb << 8) | lb
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&mut self, input: Option<u8>) {
+
+        // Handle fx0a - LD Vx, K
+        if self.wait_for_input {
+            // incrementing PC should have already occured
+            if let Some(key) = input {
+                self.register[x_i!(self.last_opcode)] = key;
+                self.wait_for_input = false;
+            }
+            return;
+        }
+
         let op: u16 = self.fetch_opcode();
+        self.last_opcode = op;
 
         // Save a lot of typing
-        let mut mem = &mut self.mem;
-        let mut reg = &mut self.reg;
+        let mut mem = &mut self.memory;
+        let mut reg = &mut self.register;
         let mut stack = &mut self.stack;
-        let mut I = self.I;
-        let mut PC = self.PC;
-        let mut SP = self.SP;
+        let mut I = self.register_I;
+        let mut PC = self.program_counter;
+        let mut SP = self.stack_pointer;
 
         match (op >> 12) & 0xf {
             0x0 => {
                 match op & 0xff {
                     // CLS
-                    0xe0 => {} // TODO
+                    0xe0 => {
+                        self.display = [0; 64 * 32];
+                    }
                     // RET
                     0xee => {
                         PC = stack[SP as usize];
                         SP -= 1;
                     }
                     // SYS addr
-                    _ => {}
+                    _ => unimplemented!()
                 }
             }
             // JP addr
@@ -160,7 +191,7 @@ impl Chip8 {
                         reg[0xf] = (vx >> 0x7) & 0x1;
                         reg[x_i!(op)] = vx << 2;
                     }
-                    _ => {}
+                    _ => unimplemented!(),
                 }
             }
             0x9 => {
@@ -180,26 +211,57 @@ impl Chip8 {
                 PC = nnn!(op) + reg[0] as u16;
             }
             0xc => {
-                reg[x_i!(op)] = kk!(op) & 42;
+                reg[x_i!(op)] = kk!(op) & rand::random::<u8>();
             } // random
-            0xd => unimplemented!(), // draw
+            0xd => {
+                // TODO: optimize draw call
+                let x = x!(op) as usize;
+                let y = y!(op) as usize;
+                let mut collision = false;
+                for i in 0..n!(op) as usize {
+                    let row = mem[(I as usize) + i];
+                    for j in 0..4 {
+                        let loc = (x + j) + (y + i) * 64;
+                        let pix = (row >> (4 + j)) & 0x1;
+                        collision = (self.display[loc] != pix) | collision;
+                        self.display[loc] ^= pix;
+                    }
+                }
+                reg[0xf] = collision as u8;
+            } // draw
             0xe => {
                 match op & 0xff {
-                    0x9e => unimplemented!(), // skip Vx
-                    0xa1 => unimplemented!(),
+                    0x9e => {
+                        if let Some(key) = input {
+                            if key == reg[x_i!(op)] {
+                                PC += 1;
+                            }
+                        }
+                    } // skip Vx
+                    0xa1 => {
+                        if let Some(key) = input {
+                            if key != reg[x_i!(op)] {
+                                PC += 1;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
             0xf => {
                 match op & 0xff {
-                    0x07 => unimplemented!(), // delay timer
-                    0x0a => unimplemented!(), // input
-                    0x15 => unimplemented!(), // delay timer
-                    0x18 => unimplemented!(), //sound timer
-                    0x1e => {
-                        I += reg[x_i!(op)] as u16;
-                    }
-                    0x29 => unimplemented!(), // sprites
+                    0x07 => reg[x_i!(op)] = self.delay_timer, // delay timer
+                    0x0a => self.wait_for_input = true,
+                    0x15 => self.delay_timer = reg[x_i!(op)], // delay timer
+                    0x18 => self.sound_timer = reg[x_i!(op)], //sound timer
+                    0x1e => I += reg[x_i!(op)] as u16,
+                    0x29 => {
+                        // The offset to the sprites is at 0x0
+                        let sprite = reg[x_i!(op)] as u16;
+                        // each sprite is 5 byte wide
+                        let offset = 0x0 + (sprite * 0x5);
+                        I = offset;
+                    } // sprites
                     0x33 => {
                         let vx = reg[x_i!(op)];
                         mem[I as usize] = vx / 100;
@@ -221,6 +283,10 @@ impl Chip8 {
             }
             _ => {}
         }
+
+        self.register_I = I;
+        self.program_counter = PC;
+        self.stack_pointer = SP;
     }
 }
 
