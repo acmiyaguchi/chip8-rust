@@ -1,10 +1,11 @@
 extern crate piston_window;
-extern crate image as im;
-extern crate vecmath;
 extern crate rand;
 
+use std::io::Read;
+use std::fs::File;
+use std::path::Path;
 use piston_window::*;
-use vecmath::*;
+use std::collections::HashMap;
 
 macro_rules! nnn { ($e:expr) => { $e & 0xfff } }
 macro_rules! n { ($e:expr) => { ($e & 0xf) as u8 } }
@@ -29,7 +30,7 @@ struct Chip8 {
 }
 
 impl Chip8 {
-    fn new() -> Chip8 {
+    pub fn new() -> Chip8 {
         // The sprite table of 0..0xf, each 5 bytes long
         let sprites: [u8; 0x50] = [
             0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
@@ -71,6 +72,12 @@ impl Chip8 {
         }
     }
 
+    fn load(&mut self, filename: &str) {
+        let mut f = File::open(Path::new(filename)).expect("A filename");
+        f.read(&mut self.memory[0x200..]);
+        self.program_counter = 0x200;
+    }
+
     fn fetch_opcode(&self) -> u16 {
         let pc = self.program_counter as usize;
         let hb = self.memory[pc] as u16;
@@ -93,6 +100,7 @@ impl Chip8 {
         let op: u16 = self.fetch_opcode();
         self.last_opcode = op;
 
+        println!("0x{:x} PC={}", op, self.program_counter);
         // Save a lot of typing
         let mut mem = &mut self.memory;
         let mut reg = &mut self.register;
@@ -111,38 +119,40 @@ impl Chip8 {
                     // RET
                     0xee => {
                         PC = stack[SP as usize];
+                        PC -= 1;
                         SP -= 1;
                     }
                     // SYS addr
-                    _ => unimplemented!()
+                    _ => {},
                 }
             }
             // JP addr
             0x1 => {
                 PC = nnn!(op);
+                PC -= 1;
             }
             // CALL addr
             0x2 => {
                 SP += 1;
-                stack[nnn!(op) as usize];
+                stack[SP as usize] = PC;
                 PC = nnn!(op);
             }
             // SE Vx, byte
             0x3 => {
                 if reg[x_i!(op)] == kk!(op) as u8 {
-                    PC += 2;
+                    PC += 1;
                 }
             }
             // SNE Vx, byte
             0x4 => {
                 if reg[x_i!(op)] != kk!(op) {
-                    PC += 2;
+                    PC += 1;
                 }
             }
             // SE Vx, Vy
             0x5 => {
                 if reg[x_i!(op)] == reg[y_i!(op)] {
-                    PC += 2;
+                    PC += 1;
                 }
             }
             // LD Vx, byte
@@ -198,7 +208,7 @@ impl Chip8 {
                 match op & 0xf {
                     0x0 => {
                         if reg[x_i!(op)] != reg[y_i!(op)] {
-                            PC += 2;
+                            PC += 1;
                         }
                     }
                     _ => {}
@@ -209,6 +219,7 @@ impl Chip8 {
             }
             0xb => {
                 PC = nnn!(op) + reg[0] as u16;
+                PC -= 1;
             }
             0xc => {
                 reg[x_i!(op)] = kk!(op) & rand::random::<u8>();
@@ -285,8 +296,24 @@ impl Chip8 {
         }
 
         self.register_I = I;
-        self.program_counter = PC;
+        self.program_counter = PC + 1;
         self.stack_pointer = SP;
+    }
+
+    pub fn draw(&mut self, args: &RenderArgs, c: Context, gl: &mut G2d) {
+        const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+        // TODO: Change this constant
+        let cell = rectangle::square(0.0, 0.0, 5.0 as f64);
+        for i in 0..64 {
+            for j in 0..32 {
+                if self.display[i + (j * 64)] != 0 {
+                    rectangle(BLACK,
+                              cell,
+                              c.transform.trans((i * 10) as f64, (j * 10) as f64),
+                              gl);
+                }
+            }
+        }
     }
 }
 
@@ -302,62 +329,35 @@ fn test_macros() {
 
 fn main() {
     let opengl = OpenGL::V3_2;
-    let (width, height) = (300, 300);
+    let pixel_size = 5;
+    let (width, height) = (64 * pixel_size, 32 * pixel_size);
     let mut window: PistonWindow = WindowSettings::new("piston: paint", (width, height))
         .exit_on_esc(true)
         .opengl(opengl)
         .build()
         .unwrap();
 
-    let mut canvas = im::ImageBuffer::new(width, height);
-    let mut draw = false;
-    let mut texture = Texture::from_image(&mut window.factory, &canvas, &TextureSettings::new())
-        .unwrap();
+    let mut chip8 = Chip8::new();
+    chip8.load("c8games/BLINKY");
 
-    let mut last_pos: Option<[f64; 2]> = None;
-
+    let keys: HashMap<Key, u8> = [
+        (Key::D1, 1),
+        (Key::D2, 2),
+        (Key::D3, 3),
+    ].iter().cloned().collect();
     while let Some(e) = window.next() {
-        if let Some(_) = e.render_args() {
-            texture.update(&mut window.encoder, &canvas).unwrap();
+        if let Some(args) = e.render_args() {
             window.draw_2d(&e, |c, g| {
                 clear([1.0; 4], g);
-                image(&texture, c.transform, g);
+                chip8.draw(&args, c, g);
             });
         }
-        if let Some(button) = e.press_args() {
-            if button == Button::Mouse(MouseButton::Left) {
-                draw = true;
-            }
-        };
-        if let Some(button) = e.release_args() {
-            if button == Button::Mouse(MouseButton::Left) {
-                draw = false;
-                last_pos = None
-            }
-        };
-        if draw {
-            if let Some(pos) = e.mouse_cursor_args() {
-                let (x, y) = (pos[0] as f32, pos[1] as f32);
-
-                if let Some(p) = last_pos {
-                    let (last_x, last_y) = (p[0] as f32, p[1] as f32);
-                    let distance = vec2_len(vec2_sub(p, pos)) as u32;
-
-                    for i in 0..distance {
-                        let diff_x = x - last_x;
-                        let diff_y = y - last_y;
-                        let delta = i as f32 / distance as f32;
-                        let new_x = (last_x + (diff_x * delta)) as u32;
-                        let new_y = (last_y + (diff_y * delta)) as u32;
-                        if new_x < width && new_y < height {
-                            canvas.put_pixel(new_x, new_y, im::Rgba([0, 0, 0, 255]));
-                        };
-                    }
-                };
-
-                last_pos = Some(pos)
-            };
-
+        let mut input_key: Option<u8> = None;
+        if let Some(Button::Keyboard(key)) = e.press_args() {
+            input_key = keys.get(&key).cloned();
+        }
+        if let Some(args) = e.update_args() {
+            chip8.step(input_key);
         }
     }
 }
