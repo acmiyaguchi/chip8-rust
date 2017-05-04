@@ -15,6 +15,43 @@ macro_rules! kk { ($e:expr) => { ($e & 0xff) as u8 } }
 macro_rules! x_i { ($e:expr) => { x!($e) as usize } }
 macro_rules! y_i { ($e:expr) => { y!($e) as usize } }
 
+struct Display {
+    memory: [u8; 64 * 32],
+}
+
+impl Display {
+    pub fn new() -> Display {
+        Display { memory: [0; 64 * 32] }
+    }
+
+    pub fn set_pixel(&mut self, bit: u8, x: u8, y: u8) -> bool {
+        let i = x as usize + (y as usize * 64);
+        let collision = self.memory[i] != bit;
+        self.memory[i] ^= bit;
+        return collision;
+    }
+
+    pub fn clear(&mut self) {
+        self.memory = [0; 64*32];
+    }
+
+    pub fn draw(&mut self, c: Context, gl: &mut G2d) {
+        const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+        // TODO: Change this constant
+        let cell = rectangle::square(0.0, 0.0, 5.0 as f64);
+        for i in 0..64 {
+            for j in 0..32 {
+                if self.memory[i + (j * 64)] != 0 {
+                    rectangle(BLACK,
+                              cell,
+                              c.transform.trans((i * 10) as f64, (j * 10) as f64),
+                              gl);
+                }
+            }
+        }
+    }
+}
+
 struct Chip8 {
     memory: [u8; 0x1000],
     register: [u8; 0x10],
@@ -24,7 +61,7 @@ struct Chip8 {
     stack: [u16; 0x10],
     delay_timer: u8,
     sound_timer: u8,
-    display: [u8; 64 * 32],
+    display: Display,
     wait_for_input: bool,
     last_opcode: u16,
 }
@@ -66,10 +103,14 @@ impl Chip8 {
             stack: [0; 0x10],
             sound_timer: 0,
             delay_timer: 0,
-            display: [0; 64 * 32],
+            display: Display::new(),
             wait_for_input: false,
             last_opcode: 0,
         }
+    }
+
+    pub fn draw(&mut self, c: Context, gl: &mut G2d) {
+        self.display.draw(c, gl)
     }
 
     fn load(&mut self, filename: &str) {
@@ -113,9 +154,7 @@ impl Chip8 {
             0x0 => {
                 match op & 0xff {
                     // CLS
-                    0xe0 => {
-                        self.display = [0; 64 * 32];
-                    }
+                    0xe0 => self.display.clear(),
                     // RET
                     0xee => {
                         PC = stack[SP as usize];
@@ -123,7 +162,7 @@ impl Chip8 {
                         SP -= 1;
                     }
                     // SYS addr
-                    _ => {},
+                    _ => {}
                 }
             }
             // JP addr
@@ -226,16 +265,14 @@ impl Chip8 {
             } // random
             0xd => {
                 // TODO: optimize draw call
-                let x = x!(op) as usize;
-                let y = y!(op) as usize;
+                let x = x!(op);
+                let y = y!(op);
                 let mut collision = false;
-                for i in 0..n!(op) as usize {
-                    let row = mem[(I as usize) + i];
+                for i in 0..n!(op) {
+                    let row = mem[I as usize + i as usize];
                     for j in 0..4 {
-                        let loc = (x + j) + (y + i) * 64;
                         let pix = (row >> (4 + j)) & 0x1;
-                        collision = (self.display[loc] != pix) | collision;
-                        self.display[loc] ^= pix;
+                        collision |= self.display.set_pixel(pix, x + j, y + i)
                     }
                 }
                 reg[0xf] = collision as u8;
@@ -299,22 +336,6 @@ impl Chip8 {
         self.program_counter = PC + 1;
         self.stack_pointer = SP;
     }
-
-    pub fn draw(&mut self, args: &RenderArgs, c: Context, gl: &mut G2d) {
-        const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-        // TODO: Change this constant
-        let cell = rectangle::square(0.0, 0.0, 5.0 as f64);
-        for i in 0..64 {
-            for j in 0..32 {
-                if self.display[i + (j * 64)] != 0 {
-                    rectangle(BLACK,
-                              cell,
-                              c.transform.trans((i * 10) as f64, (j * 10) as f64),
-                              gl);
-                }
-            }
-        }
-    }
 }
 
 #[test]
@@ -340,16 +361,15 @@ fn main() {
     let mut chip8 = Chip8::new();
     chip8.load("c8games/BLINKY");
 
-    let keys: HashMap<Key, u8> = [
-        (Key::D1, 1),
-        (Key::D2, 2),
-        (Key::D3, 3),
-    ].iter().cloned().collect();
+    let keys: HashMap<Key, u8> = [(Key::D1, 1), (Key::D2, 2), (Key::D3, 3)]
+        .iter()
+        .cloned()
+        .collect();
     while let Some(e) = window.next() {
         if let Some(args) = e.render_args() {
             window.draw_2d(&e, |c, g| {
                 clear([1.0; 4], g);
-                chip8.draw(&args, c, g);
+                chip8.draw(c, g);
             });
         }
         let mut input_key: Option<u8> = None;

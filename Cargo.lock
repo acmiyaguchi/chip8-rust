@@ -1,5 +1,5 @@
 [root]
-name = "chip8"
+name = "chip8-rust"
 version = "0.1.0"
 dependencies = [
  "piston_window 0.65.0 (registry+https://github.com/rust-lang/crates.io-index)",
